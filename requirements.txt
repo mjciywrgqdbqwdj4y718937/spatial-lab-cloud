@@ -1,0 +1,7 @@
+fastapi>=0.100
+uvicorn>=0.30
+trimesh>=4.0
+numpy
+pillow
+open3d>=0.18
+xatlas

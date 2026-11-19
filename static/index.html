@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spatial Lab · 本机 3D 平台</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css?v=__V__">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <div class="mark">◈</div>
+      <div><b>Spatial Lab</b><small>本机 3D 平台 · v2</small></div>
+    </div>
+
+    <nav id="nav">
+      <div class="nav-group">总览</div>
+      <a class="nav-item" href="#/" data-route="/"><i>◉</i>工作台</a>
+      <a class="nav-item" href="#/library" data-route="/library"><i>▦</i>模型库</a>
+      <div class="nav-group">生成</div>
+      <a class="nav-item" href="#/depth" data-route="/depth"><i>◍</i>单图重建</a>
+      <a class="nav-item" href="#/triposr" data-route="/triposr"><i>✦</i>AI 生成</a>
+      <a class="nav-item" href="#/multiview" data-route="/multiview"><i>⧉</i>多视角融合</a>
+      <a class="nav-item" href="#/text" data-route="/text"><i>✎</i>文生 3D</a>
+      <div class="nav-group">加工</div>
+      <a class="nav-item" href="#/editor" data-route="/editor"><i>◈</i>3D 编辑器</a>
+      <a class="nav-item" href="#/toolbox" data-route="/toolbox"><i>⚙</i>工具箱</a>
+      <div class="nav-group">平台</div>
+      <a class="nav-item" href="#/system" data-route="/system"><i>◔</i>系统状态</a>
+    </nav>
+
+    <div class="side-foot">
+      <div class="mini" id="sideBox">
+        <div class="row"><span>引擎</span><b id="sbEngine">…</b></div>
+        <div class="row"><span>GPU</span><b id="sbGpu">…</b></div>
+        <div class="row"><span>模型</span><b id="sbModels">0</b></div>
+      </div>
+      <div class="note sm">全部在本机跑，不上传云端。</div>
+    </div>
+  </aside>
+
+  <main>
+    <header class="top">
+      <div class="crumb" id="crumb">工作台</div>
+      <div class="top-right">
+        <span class="pill" id="pillEngine"><span class="dot"></span>引擎</span>
+        <span class="pill" id="pillQueue">队列 0</span>
+        <span class="clock" id="clock">--:--:--</span>
+      </div>
+    </header>
+    <div class="view" id="view"></div>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- three.js 只在进「3D 编辑器」时按需加载，首屏不背这 589 KB -->
+<script src="/static/app.js?v=__V__"></script>
+</body>
+</html>
