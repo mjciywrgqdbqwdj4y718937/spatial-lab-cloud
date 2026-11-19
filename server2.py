@@ -80,6 +80,15 @@ ENGINE = {"proc": None, "q_in": None, "q_out": None, "gpu": None, "ready": False
           "started_at": None, "tasks": 0}
 PIPE_LOG: list[dict] = []
 
+# ─── 混合云队列：云端排队、本地 GPU 代跑 ───
+try:
+    import hybrid_queue as HQ
+    HQ.init(WORK)
+except Exception as _e:  # noqa: BLE001
+    HQ = None
+    print("hybrid_queue 初始化失败:", _e)
+
+
 
 def now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1725,6 +1734,111 @@ def _dir_size(p: Path) -> int:
             except OSError:
                 pass
     return total
+
+
+# ─────────────────────────── 混合云队列 ───────────────────────────
+@app.post("/api/queue/submit")
+async def api_queue_submit(
+    pipeline: str = Form(...),
+    params: str = Form("{}"),
+    image: Optional[UploadFile] = File(None),
+):
+    """云端提交 GPU 任务，进入等待队列。"""
+    if HQ is None:
+        raise HTTPException(500, "队列未初始化")
+    pdef = PIPE_MAP.get(pipeline)
+    if not pdef:
+        raise HTTPException(400, f"未知管线 {pipeline}")
+    try:
+        pj = json.loads(params or "{}")
+    except Exception:
+        raise HTTPException(400, "params 不是合法 JSON")
+    data = None
+    ext = ".png"
+    if image is not None:
+        ext = Path(image.filename or "x.png").suffix.lower() or ".png"
+        data = await image.read()
+    tid = HQ.submit(pipeline, pj, data, ext=ext, note=pdef.get("name", pipeline))
+    return JSONResponse({"ok": True, "queued": True, "task_id": tid,
+                         "tip": "已进入云端队列，本地 GPU 在线时会自动处理"})
+
+
+@app.get("/api/queue/pending")
+def api_queue_pending(token: str = "", worker: str = "local"):
+    if HQ is None:
+        raise HTTPException(500, "队列未初始化")
+    if token != HQ.QUEUE_TOKEN:
+        raise HTTPException(403, "token 不正确")
+    t = HQ.claim_next(worker)
+    if not t:
+        return JSONResponse({"task": None})
+    d = WORK / "_queue" / t["task_id"]
+    out = dict(t)
+    if t.get("input"):
+        out["input_url"] = f"/api/queue/file/{t['task_id']}/{t['input']}"
+    return JSONResponse({"task": out})
+
+
+@app.get("/api/queue/file/{task_id}/{name}")
+def api_queue_file(task_id: str, name: str):
+    if HQ is None:
+        raise HTTPException(500, "队列未初始化")
+    if not re.fullmatch(r"[a-f0-9]{12}", task_id) or "/" in name or ".." in name:
+        raise HTTPException(400, "路径不合法")
+    p = WORK / "_queue" / task_id / name
+    if not p.exists():
+        raise HTTPException(404, "文件不存在")
+    return FileResponse(p)
+
+
+@app.post("/api/queue/result")
+async def api_queue_result(
+    token: str = Form(""),
+    task_id: str = Form(...),
+    result: str = Form("{}"),
+    error: str = Form(""),
+    glb: Optional[UploadFile] = File(None),
+    thumb: Optional[UploadFile] = File(None),
+):
+    if HQ is None:
+        raise HTTPException(500, "队列未初始化")
+    if token != HQ.QUEUE_TOKEN:
+        raise HTTPException(403, "token 不正确")
+    try:
+        rj = json.loads(result or "{}")
+    except Exception:
+        rj = {}
+    files: dict[str, bytes] = {}
+    if glb is not None:
+        files["model.glb"] = await glb.read()
+    if thumb is not None:
+        files["thumb.webp"] = await thumb.read()
+    ok = HQ.finish(task_id, result=rj, error=(error or None), files=files or None)
+    return JSONResponse({"ok": ok})
+
+
+@app.get("/api/queue/status/{task_id}")
+def api_queue_status(task_id: str):
+    if HQ is None:
+        raise HTTPException(500, "队列未初始化")
+    if not re.fullmatch(r"[a-f0-9]{12}", task_id):
+        raise HTTPException(400, "id 不合法")
+    t = HQ.load(task_id)
+    if not t:
+        raise HTTPException(404, "任务不存在")
+    out = dict(t)
+    if (WORK / "_queue" / task_id / "model.glb").exists():
+        out["glb_url"] = f"/api/queue/file/{task_id}/model.glb"
+    if (WORK / "_queue" / task_id / "thumb.webp").exists():
+        out["thumb_url"] = f"/api/queue/file/{task_id}/thumb.webp"
+    return JSONResponse(out)
+
+
+@app.get("/api/queue/stats")
+def api_queue_stats():
+    if HQ is None:
+        return JSONResponse({"error": "队列未初始化"})
+    return JSONResponse(HQ.stats())
 
 
 @app.get("/api/status")
