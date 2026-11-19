@@ -359,8 +359,52 @@ async function viewPipeline(pipeId) {
   }
 
   if (p.available === false) {
+    // 云模式：允许提交到混合云队列，由本地 GPU 代跑
     const btn = $('#run');
-    if (btn) { btn.disabled = true; btn.textContent = '需 GPU · 请用本地平台'; }
+    if (btn) btn.textContent = '提交到云端队列（本地 GPU 代跑）';
+    $('#run').onclick = async () => {
+      if (!S.selectedFile) return toast(multi ? '先选至少一张图片' : '先选一张图片', true);
+      const params = collectParams($('#params'));
+      const fd = new FormData();
+      fd.append('pipeline', pipeId);
+      fd.append('params', JSON.stringify(params));
+      if (multi) S.selectedFiles.forEach((f) => fd.append('image', f));
+      else fd.append('image', S.selectedFile);
+      $('#run').disabled = true;
+      $('#prog').innerHTML = `<div class="jobline"><span class="st">上传中…</span></div><div class="bar"><i style="width:2%"></i></div>`;
+      try {
+        const r = await submitQueue(fd, (pct) => {
+          $('#prog').innerHTML = `<div class="jobline"><span class="st">上传中</span><span>${Math.round(pct * 100)}%</span></div>
+            <div class="bar"><i style="width:${Math.max(2, pct * 100)}%"></i></div>`;
+        });
+        toast('已进入云端队列：' + r.task_id);
+        pollQueue(r.task_id, $('#prog'), (t) => {
+          $('#run').disabled = false;
+          if (t.status === 'done') {
+            const res = t.result || {};
+            $('#result').innerHTML = `<div class="card"><h3>完成 · 由本地 GPU 代跑</h3>
+              <div class="grid g4" style="margin-top:12px">
+                <div class="card kpi" style="background:#0a1017"><div class="v">${fmtInt(res.tris)}</div><div class="k">三角面</div></div>
+                <div class="card kpi" style="background:#0a1017"><div class="v">${fmtInt(res.verts)}</div><div class="k">顶点</div></div>
+                <div class="card kpi" style="background:#0a1017"><div class="v">${t.glb_url ? '可下载' : '—'}</div><div class="k">产物</div></div>
+                <div class="card kpi" style="background:#0a1017"><div class="v">${res.kb || '—'}</div><div class="k">KB</div></div>
+              </div>
+              ${t.glb_url ? `<div class="row" style="margin-top:12px">
+                <a class="btn sm primary" href="${t.glb_url}" download>⬇ 下载 GLB</a>
+                ${t.thumb_url ? `<img src="${t.thumb_url}" style="width:120px;border-radius:8px;border:1px solid var(--line)">` : ''}
+              </div>` : ''}
+            </div>`;
+            toast('任务完成');
+          } else {
+            $('#result').innerHTML = `<div class="card"><h3>失败</h3><div class="note" style="color:var(--bad)">${esc(t.error || '')}</div></div>`;
+            toast('任务失败', true);
+          }
+        });
+      } catch (e) {
+        $('#run').disabled = false;
+        toast(e.message, true);
+      }
+    };
     return;
   }
   $('#run').onclick = async () => {
@@ -534,6 +578,58 @@ function submitJob(fd, onProgress) {
     xhr.ontimeout = () => reject(new Error('上传超时'));
     xhr.send(fd);
   });
+}
+
+/* ── 混合云队列：云端提交、本地 GPU 代跑 ── */
+function submitQueue(fd, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/queue/submit');
+    xhr.timeout = 600000;
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let j = null;
+      try { j = JSON.parse(xhr.responseText); } catch (e) { j = null; }
+      if (xhr.status >= 200 && xhr.status < 300 && j && j.task_id) resolve(j);
+      else reject(new Error((j && (j.detail || j.error)) || ('HTTP ' + xhr.status)));
+    };
+    xhr.onerror = () => reject(new Error('上传失败：网络中断'));
+    xhr.ontimeout = () => reject(new Error('上传超时'));
+    xhr.send(fd);
+  });
+}
+
+function pollQueue(tid, box, done) {
+  let busy = false;
+  const tick = async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const t = await api('/api/queue/status/' + tid);
+      const label = t.status === 'pending' ? '排队中（等待本地 GPU 上线）'
+        : t.status === 'claimed' ? '本地 GPU 正在处理…'
+        : t.status === 'done' ? '完成' : '失败';
+      if (box) {
+        const pct = t.status === 'done' ? 100 : (t.status === 'claimed' ? 60 : 10);
+        box.innerHTML = `<div class="jobline"><span class="st">${esc(label)}</span>
+          <span class="spacer"></span><span class="mono">${esc(tid)}</span></div>
+          <div class="bar"><i style="width:${pct}%"></i></div>
+          ${t.error ? `<div class="note" style="color:var(--bad);margin-top:8px">${esc(t.error)}</div>` : ''}`;
+      }
+      if (t.status === 'done' || t.status === 'failed') {
+        clearInterval(S.qtimer); S.qtimer = null;
+        if (done) done(t);
+      }
+    } catch (e) {
+      // 忽略单次失败
+    } finally {
+      busy = false;
+    }
+  };
+  tick();
+  S.qtimer = setInterval(() => { if (!document.hidden) tick(); }, 3000);
 }
 
 function pollJob(jid, box, done) {
