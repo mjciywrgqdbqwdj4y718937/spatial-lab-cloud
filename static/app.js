@@ -1,4 +1,4 @@
-/* Spatial Lab · 前端（原生 JS + three.js r128） */
+/* Wildfire · 前端（原生 JS + three.js r128） */
 'use strict';
 
 const S = {
@@ -106,9 +106,9 @@ function markNavAvailability() {
     if (pipe && pipe.available === false && !a.querySelector('.nav-warn')) {
       const tag = document.createElement('span');
       tag.className = 'nav-warn';
-      tag.textContent = '需本地';
+      tag.textContent = '队列';
       tag.style.cssText = 'margin-left:auto;font-size:9.5px;padding:1px 6px;border-radius:8px;'
-        + 'background:rgba(255,182,72,.15);border:1px solid rgba(255,182,72,.4);color:#ffb648';
+        + 'background:rgba(56,224,200,.12);border:1px solid rgba(56,224,200,.35);color:#38e0c8';
       a.appendChild(tag);
     }
   });
@@ -301,7 +301,7 @@ async function viewPipeline(pipeId) {
 
   const blocked = p.available === false;
   view.innerHTML = `
-  ${blocked ? `<div class="notice" style="margin-bottom:14px;border-color:rgba(255,182,72,.35);background:rgba(255,182,72,.06)">⚠️ <b>${esc(p.name)}</b> 需要 GPU，当前云端模式无法运行。请在本地平台打开 <code>http://127.0.0.1:8791/</code>。</div>` : ''}
+  ${blocked ? `<div class="notice" id="gpuNode" style="margin-bottom:14px">⚡ <b>${esc(p.name)}</b> · 由 GPU 算力节点处理 <span id="gpuNodeState">检测中…</span></div>` : ''}
   <div class="grid g2" style="grid-template-columns: 1fr 380px; align-items:start">
     <div class="card">
       <h3>输入</h3>
@@ -361,7 +361,8 @@ async function viewPipeline(pipeId) {
   if (p.available === false) {
     // 云模式：允许提交到混合云队列，由本地 GPU 代跑
     const btn = $('#run');
-    if (btn) btn.textContent = '提交到云端队列（本地 GPU 代跑）';
+    if (btn) btn.textContent = '▶ 提交任务（GPU 节点处理）';
+    refreshNodeState();
     $('#run').onclick = async () => {
       if (!S.selectedFile) return toast(multi ? '先选至少一张图片' : '先选一张图片', true);
       const params = collectParams($('#params'));
@@ -580,6 +581,23 @@ function submitJob(fd, onProgress) {
   });
 }
 
+/* ── GPU 算力节点状态 ── */
+async function refreshNodeState() {
+  const el = document.getElementById('gpuNodeState');
+  if (!el) return;
+  try {
+    const w = await api('/api/queue/workers');
+    if (w.online > 0) {
+      const soonest = Math.min(...Object.values(w.workers || {}));
+      el.innerHTML = `<span style="color:#3ad07f">● 节点在线</span>（${w.online} 个，最近心跳 ${Math.round(soonest)} 秒前）· 通常 30 秒出结果`;
+    } else {
+      el.innerHTML = `<span style="color:#ffb648">● 节点待命</span> · 提交后排队，GPU 上线即处理`;
+    }
+  } catch (e) {
+    el.textContent = '';
+  }
+}
+
 /* ── 混合云队列：云端提交、本地 GPU 代跑 ── */
 function submitQueue(fd, onProgress) {
   return new Promise((resolve, reject) => {
@@ -719,10 +737,19 @@ function renderLib(q) {
       ${tabs.map(([k, label]) => `<button class="btn sm ${libFilter === k ? 'primary' : ''}" data-filter="${k}">${label}</button>`).join('')}
       <span class="tag" style="margin-left:auto">当前显示 ${list.length} 个</span>
     </div>
-    ${list.length ? `<div class="lib">${list.map(card).join('')}</div>` : `<div class="empty">没有匹配的模型</div>`}`;
+    ${list.length ? `<div class="lib">${list.slice(0, S.libShown || 120).map(card).join('')}</div>` : `<div class="empty">没有匹配的模型</div>`}
+    ${list.length > (S.libShown || 120) ? `<div class="row" style="justify-content:center;margin-top:16px"><button class="btn" id="libMore">加载更多（还有 ${list.length - (S.libShown || 120)} 个）</button></div>` : ''}`;
+
+  const moreBtn = $('#libMore');
+  if (moreBtn) {
+    moreBtn.onclick = () => {
+      S.libShown = (S.libShown || 120) + 120;
+      renderLib($('#libSearch').value.trim());
+    };
+  }
 
   $$('[data-filter]').forEach((b) => {
-    b.onclick = () => { libFilter = b.dataset.filter; renderLib($('#libSearch').value.trim()); };
+    b.onclick = () => { libFilter = b.dataset.filter; S.libShown = 120; renderLib($('#libSearch').value.trim()); };
   });
   $('#libSearch').oninput = (e) => { const v = e.target.value.trim(); renderLibKeep(v); };
   $('#libReload').onclick = async () => { await loadModels(); renderLib(q); toast('已刷新'); };
@@ -806,7 +833,8 @@ async function viewEditor() {
         <h3>材质</h3>
         <div class="field"><label>金属感<b id="vMetal">0.08</b></label><input type="range" id="metal" min="0" max="1" step="0.02" value="0.08"></div>
         <div class="field"><label>粗糙度<b id="vRough">0.72</b></label><input type="range" id="rough" min="0" max="1" step="0.02" value="0.72"></div>
-        <div class="field"><label>发光<b id="vEmis">0.00</b></label><input type="range" id="emis" min="0" max="1" step="0.02" value="0"></div>
+        <div class="field"><label>亮度<b id="vBright">1.00</b></label><input type="range" id="bright" min="0.2" max="2.5" step="0.05" value="1"><div class="mut" style="font-size:10.5px;margin-top:2px">调亮调暗整个场景</div></div>
+            <div class="field"><label>自发光<b id="vEmis">0.00</b></label><input type="range" id="emis" min="0" max="1" step="0.02" value="0"><div class="mut" style="font-size:10.5px;margin-top:2px">让模型自己发青光</div></div>
         <div class="switch" id="swWire"><span>线框</span><div class="knob"></div></div>
         <div style="height:8px"></div>
         <div class="switch on" id="swVColor"><span>顶点色</span><div class="knob"></div></div>
@@ -860,10 +888,14 @@ function mountEditor(jid) {
   renderer.outputEncoding = THREE.sRGBEncoding;
   wrap.insertBefore(renderer.domElement, hint);
 
-  scene.add(new THREE.HemisphereLight(0xcfe6ff, 0x24303c, 1.15));
+  const hemi = new THREE.HemisphereLight(0xcfe6ff, 0x24303c, 1.15); scene.add(hemi);
   const key = new THREE.DirectionalLight(0xffffff, 1.5); key.position.set(3, 5, 4); scene.add(key);
   const rim = new THREE.DirectionalLight(0x7b6cff, 0.75); rim.position.set(-4, 2, -3); scene.add(rim);
   const fill = new THREE.DirectionalLight(0x38e0c8, 0.45); fill.position.set(0, -3, 2); scene.add(fill);
+  const LIGHTS = [
+    { l: hemi, base: 1.15 }, { l: key, base: 1.5 },
+    { l: rim, base: 0.75 }, { l: fill, base: 0.45 },
+  ];
 
   const grid = new THREE.GridHelper(6, 24, 0x1d2b3a, 0x141d28);
   grid.position.y = -1.001;
@@ -871,7 +903,11 @@ function mountEditor(jid) {
 
   const controls = new THREE.OrbitControls(cam, renderer.domElement);
   controls.enableDamping = true; controls.dampingFactor = 0.08;
-  controls.minDistance = 0.4; controls.maxDistance = 40;
+  controls.zoomSpeed = 1.15;
+  controls.panSpeed = 0.9;
+  controls.rotateSpeed = 0.85;
+  // 先给个宽松范围，载入模型后按实际尺寸重设（见 fitCamera）
+  controls.minDistance = 0.001; controls.maxDistance = 1e6;
 
   let root = null, spin = false;
   const api_ = {
@@ -918,7 +954,10 @@ function mountEditor(jid) {
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
     const dist = maxDim * 2.1;
     cam.position.set(center.x + dist * 0.75, center.y + dist * 0.5, center.z + dist * 0.85);
-    cam.near = maxDim / 1000; cam.far = maxDim * 100; cam.updateProjectionMatrix();
+    cam.near = Math.max(maxDim / 2000, 1e-5); cam.far = maxDim * 200; cam.updateProjectionMatrix();
+    // 按模型实际尺寸定缩放范围：能贴到表面，也能拉到很远
+    controls.minDistance = maxDim * 0.02;
+    controls.maxDistance = maxDim * 25;
     controls.target.copy(center);
     controls.update();
     const g = Math.max(maxDim * 3, 2);
@@ -949,6 +988,11 @@ function mountEditor(jid) {
   window.addEventListener('resize', onResize);
   api_.onResize = onResize;
 
+  api_.setBrightness = (v) => {
+    LIGHTS.forEach(({ l, base }) => { l.intensity = base * v; });
+    if (renderer.toneMappingExposure !== undefined) renderer.toneMappingExposure = 0.85 * v;
+  };
+
   api_.setMat = (k, v) => {
     if (!root) return;
     root.traverse((o) => {
@@ -956,7 +1000,7 @@ function mountEditor(jid) {
       (o.userData.mats || []).forEach((mt) => {
         if (k === 'metal') mt.metalness = v;
         if (k === 'rough') mt.roughness = v;
-        if (k === 'emis') { mt.emissive = new THREE.Color(0x38e0c8); mt.emissiveIntensity = v; }
+        if (k === 'emis') { mt.emissive = new THREE.Color(0x38e0c8); mt.emissiveIntensity = v * 0.35; }
         if (k === 'wire') mt.wireframe = v;
         if (k === 'vcolor') { mt.vertexColors = v && o.userData.hasColor; }
         mt.needsUpdate = true;
@@ -1005,6 +1049,7 @@ function bindEditorControls() {
   $('#metal').oninput = (e) => { $('#vMetal').textContent = (+e.target.value).toFixed(2); E().setMat('metal', +e.target.value); };
   $('#rough').oninput = (e) => { $('#vRough').textContent = (+e.target.value).toFixed(2); E().setMat('rough', +e.target.value); };
   $('#emis').oninput = (e) => { $('#vEmis').textContent = (+e.target.value).toFixed(2); E().setMat('emis', +e.target.value); };
+  $('#bright').oninput = (e) => { $('#vBright').textContent = (+e.target.value).toFixed(2); E().setBrightness(+e.target.value); };
   $('#swWire').onclick = (e) => { e.currentTarget.classList.toggle('on'); E().setMat('wire', e.currentTarget.classList.contains('on')); };
   $('#swVColor').onclick = (e) => { e.currentTarget.classList.toggle('on'); E().setMat('vcolor', e.currentTarget.classList.contains('on')); };
   $('#swGrid').onclick = (e) => { e.currentTarget.classList.toggle('on'); E().setGrid(e.currentTarget.classList.contains('on')); };
