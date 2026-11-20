@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Spatial Lab · 本机 3D 平台（多管线）
+"""Wildfire · 3D 生产平台（多管线）
 
 后端能力：
   depth     单图 → 深度 → 点云 → 泊松网格
@@ -70,7 +70,7 @@ for a in sys.argv[1:]:
     elif a == "--no-browser":
         OPEN_BROWSER = False
 
-app = FastAPI(title="Spatial Lab", version="2.0")
+app = FastAPI(title="Wildfire", version="2.0")
 # 公网隧道下 589 KB 的 three.js 是首屏杀手：gzip 后能压到 150 KB 左右
 app.add_middleware(GZipMiddleware, minimum_size=600)
 BOOT_TAG = str(int(time.time()))
@@ -1488,7 +1488,87 @@ def worker_main(q_in, q_out):
                 pass
 
 
+def _run_inline(jid: str, pipe: str, params: dict, src, srcs):
+    """云模式：在当前进程的线程里执行管线，结束后释放内存。"""
+    out_dir = WORK / jid
+    out_dir.mkdir(parents=True, exist_ok=True)
+    args = dict(params)
+    args["_cache"] = {}
+    src_p = Path(src) if src else None
+    srcs_p = [Path(x) for x in (srcs or [])]
+
+    def progress(stage, pct, _jid=jid):
+        with LOCK:
+            j = JOBS.get(_jid)
+            if j:
+                j["stage"] = stage
+                j["progress"] = int(pct)
+                _persist(j)
+
+    FN = {
+        "depth": pipe_depth, "triposr": pipe_triposr, "simplify": pipe_simplify,
+        "smooth": pipe_smooth, "repair": pipe_repair, "convert": pipe_convert,
+        "render": pipe_render, "measure": pipe_measure,
+        "multiview": pipe_multiview, "text2img": pipe_text2img,
+        "text3d": pipe_text3d, "highpoly": pipe_highpoly, "uvbake": pipe_uvbake,
+        "normalize": pipe_normalize, "assetcheck": pipe_assetcheck, "lod": pipe_lod,
+        "blender_export": pipe_blender_export, "maya_export": pipe_maya_export,
+    }
+    t0 = time.time()
+    try:
+        with LOCK:
+            j = JOBS.get(jid)
+            if j:
+                j["stage"] = "计算中"
+                j["progress"] = 5
+        if pipe not in FN:
+            raise RuntimeError(f"未知管线 {pipe}")
+        if pipe == "multiview":
+            res = pipe_multiview(srcs_p, out_dir, args, progress)
+        else:
+            res = FN[pipe](src_p, out_dir, args, progress)
+        res["ms"] = int((time.time() - t0) * 1000)
+        try:
+            target = res.get("glb") or res.get("file")
+            if target and not (out_dir / "thumb.webp").exists():
+                cand = out_dir / target
+                if cand.exists() and cand.suffix.lower() in {".glb", ".obj", ".ply", ".stl", ".off", ".gltf", ".3mf"}:
+                    try:
+                        _render_png(str(cand), str(out_dir / "thumb.webp"), size=320)
+                    except Exception:
+                        _render_png(str(cand), str(out_dir / "thumb.png"), size=320)
+        except Exception:
+            pass
+        with LOCK:
+            j = JOBS.get(jid)
+            if j:
+                j.update(status="done", progress=100, stage="完成", result=res,
+                         finished_at=ts_short())
+                _persist(j)
+    except Exception as e:  # noqa: BLE001
+        with LOCK:
+            j = JOBS.get(jid)
+            if j:
+                j.update(status="failed", stage="失败", error=f"{type(e).__name__}: {e}",
+                         trace=traceback.format_exc()[-2500:], finished_at=ts_short())
+                _persist(j)
+    finally:
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+
+
 def _ensure_engine():
+    if CLOUD_MODE:
+        # 云端不常驻 worker：省 700+ MB 内存，任务来了现开线程
+        with LOCK:
+            if not ENGINE.get("ready"):
+                ENGINE.update(proc=None, q_in=None, q_out=None, ready=True,
+                              gpu={"name": "CPU (cloud)", "mem_gb": None, "cuda": False},
+                              started_at=ts_short())
+        return
     with LOCK:
         if ENGINE["proc"] is not None and ENGINE["proc"].is_alive():
             return
@@ -1617,9 +1697,13 @@ async def api_run(
     with LOCK:
         JOBS[jid] = job
     _persist(job)
-    _ensure_engine()
-    ENGINE["q_in"].put({"job_id": jid, "pipeline": pipeline, "params": pj,
-                        "src": src_path, "srcs": src_paths})
+    if CLOUD_MODE:
+        threading.Thread(target=_run_inline,
+                         args=(jid, pipeline, pj, src_path, src_paths), daemon=True).start()
+    else:
+        _ensure_engine()
+        ENGINE["q_in"].put({"job_id": jid, "pipeline": pipeline, "params": pj,
+                            "src": src_path, "srcs": src_paths})
     ENGINE["tasks"] += 1
     return JSONResponse({"ok": True, "job_id": jid})
 
@@ -1662,9 +1746,13 @@ def api_jobs(limit: int = 30):
 _MODELS_CACHE = {"at": 0.0, "data": None, "ttl": 20.0}
 
 
+LIGHT_FIELDS = {"job_id", "asset_name", "tris", "kb", "thumb", "glb",
+                "pipeline", "pipeline_name", "status", "mtime"}
+
+
 @app.get("/api/models")
-def api_models(refresh: bool = False):
-    """模型列表（20 秒内存缓存：几百个目录时全扫描会拖垮首屏）。"""
+def api_models(refresh: bool = False, limit: int = 0, offset: int = 0, full: bool = False):
+    """模型列表（20 秒内存缓存；默认精简字段并支持分页，减少公网传输量）。"""
     now = time.time()
     if (not refresh and _MODELS_CACHE["data"] is not None
             and now - _MODELS_CACHE["at"] < _MODELS_CACHE["ttl"]):
@@ -1709,7 +1797,22 @@ def api_models(refresh: bool = False):
     data = {"models": out}
     _MODELS_CACHE["data"] = data
     _MODELS_CACHE["at"] = now
-    return JSONResponse(data)
+    if full:
+        return JSONResponse(data)
+
+    # 精简字段（前端只需要这些），传输量约减半；支持分页
+    raw = data.get("models") or []
+    slim = [{k: v for k, v in m.items() if k in LIGHT_FIELDS} for m in raw]
+    total = len(slim)
+    start = max(0, int(offset or 0))
+    end = total if not limit else min(total, start + int(limit))
+    return JSONResponse({
+        "models": slim[start:end],
+        "count": total,
+        "total_tris": data.get("total_tris") or sum(int(m.get("tris") or 0) for m in raw),
+        "offset": start,
+        "limit": int(limit or 0),
+    })
 
 
 @app.delete("/api/model/{jid}")
@@ -1834,6 +1937,14 @@ def api_queue_status(task_id: str):
     return JSONResponse(out)
 
 
+@app.get("/api/queue/workers")
+def api_queue_workers():
+    """算力节点在线状态。"""
+    if HQ is None:
+        return JSONResponse({"online": 0, "total": 0, "workers": {}})
+    return JSONResponse(HQ.workers_status())
+
+
 @app.get("/api/queue/stats")
 def api_queue_stats():
     if HQ is None:
@@ -1853,7 +1964,7 @@ def api_status():
         "ok": True,
         "mode": "cloud" if CLOUD_MODE else "local",
         "service": {"port": PORT, "uptime_since": ENGINE["started_at"], "now": ts_short()},
-        "engine": {"alive": bool(ENGINE["proc"] and ENGINE["proc"].is_alive()),
+        "engine": {"alive": bool(ENGINE.get("ready")) or bool(ENGINE["proc"] and ENGINE["proc"].is_alive()),
                    "ready": ENGINE["ready"], "pid": ENGINE["proc"].pid if ENGINE["proc"] else None,
                    "gpu": ENGINE["gpu"], "tasks": ENGINE["tasks"]},
         "jobs": {"total": jobs, "running": running},
@@ -1959,7 +2070,7 @@ def _lan_ips() -> list[str]:
 def main() -> int:
     url = f"http://127.0.0.1:{PORT}/"
     print("=" * 58)
-    print("  Spatial Lab 2.0 · 本机 3D 平台")
+    print("  Wildfire 2.0 · 3D 生产平台")
     print(f"  本机：{url}")
     for ip in _lan_ips():
         print(f"  局域网（同一 WiFi 手机/平板可开）：http://{ip}:{PORT}/")
